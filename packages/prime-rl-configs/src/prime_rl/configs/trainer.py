@@ -462,9 +462,23 @@ class FakeDataLoaderConfig(BaseConfig):
     """Generate separate samples and pack them into a single micro-batch instead of using random tensors."""
 
 
+class TraceDataLoaderConfig(BaseConfig):
+    path: Path
+    """Path to a prepared Prime ``steps.jsonl.gz`` benchmark artifact."""
+
+
 class DataLoaderConfig(BaseConfig):
     fake: FakeDataLoaderConfig | None = None
     """Use a fake data loader sampling random micro-batches (for debugging)."""
+
+    trace: TraceDataLoaderConfig | None = None
+    """Replay prepared RL steps through Prime's native sequence packer."""
+
+    @model_validator(mode="after")
+    def select_one_source(self):
+        if self.fake is not None and self.trace is not None:
+            raise ValueError("data.fake and data.trace are mutually exclusive")
+        return self
 
 
 class BaseWeightBroadcastConfig(BaseConfig):
@@ -549,7 +563,7 @@ class TrainerConfig(BaseConfig):
     """Path to write the memory profile to."""
 
     bench: BenchConfig | None = None
-    """Benchmark-mode configuration. When set, ``max_steps`` is forced to 4 and fake data is used."""
+    """Benchmark-mode configuration. Uses one warmup step followed by fixed measured steps."""
 
     gc: GCConfig | None = GCConfig()
     """Garbage collection config. Disables automatic GC and runs deterministic collections every N steps to avoid stragglers. Set to null to use Python's default GC behavior."""
@@ -608,11 +622,22 @@ class TrainerConfig(BaseConfig):
     @model_validator(mode="after")
     def auto_setup_bench(self):
         if self.bench is not None:
-            self.max_steps = 4  # 1 Warmup + 3 Benchmark
-            if not self.data.fake:
+            if self.data.trace is not None:
+                self.max_steps = 6  # 1 warmup + 5 measured steps
+            else:
+                self.max_steps = 4  # 1 warmup + 3 measured steps
+            if self.data.fake is None and self.data.trace is None:
                 self.data.fake = FakeDataLoaderConfig()
             if self.ckpt:  # Do not checkpoint
                 self.ckpt = None
+        return self
+
+    @model_validator(mode="after")
+    def trace_data_is_benchmark_only(self):
+        if self.data.trace is not None and self.bench is None:
+            raise ValueError("data.trace requires benchmark mode")
+        if self.data.trace is not None and self.max_concurrent_runs != 1:
+            raise ValueError("data.trace requires max_concurrent_runs=1")
         return self
 
     @model_validator(mode="after")

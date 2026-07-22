@@ -120,7 +120,6 @@ def train(config: TrainerConfig):
     multi_run_manager = setup_multi_run_manager(
         config.output_dir, config.max_concurrent_runs, torch.device("cuda", world.local_rank), config.model.lora
     )
-
     # Resolve ep="auto" to a concrete integer before creating parallel dims
     resolve_ep(config.model)
 
@@ -148,6 +147,9 @@ def train(config: TrainerConfig):
     logger.info(f"Initializing model ({config.model})")
     loading_from_ckpt_later = config.ckpt and checkpoint_step is not None
     model = setup_model(config.model, parallel_dims, loading_from_ckpt_later)
+    if config.data.trace is not None and config.model.lora is not None:
+        multi_run_manager.reset_run_parameters(0)
+        multi_run_manager.scaling_factors[0] = config.model.lora.alpha / config.model.lora.rank
 
     logger.info(f"Initializing tokenizer ({config.tokenizer})")
     tokenizer = setup_tokenizer(config.tokenizer)
@@ -160,11 +162,16 @@ def train(config: TrainerConfig):
     logger.info(f"Initializing optimizer ({config.optim})")
 
     if config.max_concurrent_runs == 1:
+        named_parameters = list(model.named_parameters())
+        discover_lora_run = config.model.lora is not None
+        if config.data.trace is not None and config.model.lora is not None:
+            named_parameters = multi_run_manager.get_named_parameters_for_run(0)
+            discover_lora_run = False
         optimizer = setup_optimizer(
             config.optim,
-            list(model.named_parameters()),
+            named_parameters,
             parallel_dims,
-            lora=config.model.lora is not None,
+            lora=discover_lora_run,
             cpu_offload=config.model.optim_cpu_offload,
         )
         scheduler = setup_scheduler(optimizer, config.scheduler, config.max_steps, config.optim.lr)
@@ -180,10 +187,10 @@ def train(config: TrainerConfig):
 
     logger.info(f"Using `{config.scheduler.type}` scheduler ({config.scheduler})")
 
-    # Set up weight broadcast (skip when using fake data since there's no inference server)
-    if config.data.fake:
+    # Local benchmark data modes have no inference server waiting for weights.
+    if config.data.fake is not None or config.data.trace is not None:
         weight_broadcast = None
-        logger.info("Skipping weight broadcast setup (fake data mode)")
+        logger.info("Skipping weight broadcast setup (local benchmark data mode)")
     else:
         logger.info(f"Initializing weight broadcast ({config.weight_broadcast})")
         weight_broadcast = setup_weight_broadcast(config.output_dir, config.weight_broadcast, config.model.lora)
@@ -243,6 +250,7 @@ def train(config: TrainerConfig):
             config.model.cp,
             build_bin_cost(model.config),
             config.rollout_transport,
+            trace_path=config.data.trace.path if config.data.trace is not None else None,
         )
 
     token_exporter = setup_token_exporter(config, parallel_dims, world, logger)
