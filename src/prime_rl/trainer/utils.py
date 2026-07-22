@@ -457,7 +457,7 @@ def export_benchmark_json(history: dict[str, list[Any]], output_path: Path) -> N
     """
     Export benchmark results to a JSON file.
 
-    The JSON contains aggregated statistics (mean, std, min, max) for each metric.
+    The JSON contains aggregated statistics and the warmup-excluded actor-update series.
     """
     history = history.copy()
     history.pop("step", None)
@@ -468,6 +468,7 @@ def export_benchmark_json(history: dict[str, list[Any]], output_path: Path) -> N
         "perf/mfu": "mfu",
         "perf/throughput": "throughput",
         "time/step": "step_time",
+        "time/forward_backward": "actor_update_time",
         "perf/peak_memory": "peak_memory",
     }
     df = df[columns.keys()].rename(columns=columns)
@@ -481,6 +482,7 @@ def export_benchmark_json(history: dict[str, list[Any]], output_path: Path) -> N
     peak_memory_pct = stats["peak_memory"]["mean"] / total_memory_gib * 100
 
     result = {
+        "warmup_steps": 1,
         "mfu": {
             "mean": float(stats["mfu"]["mean"]),
             "std": float(stats["mfu"]["std"]),
@@ -499,6 +501,7 @@ def export_benchmark_json(history: dict[str, list[Any]], output_path: Path) -> N
             "min": float(stats["step_time"]["min"]),
             "max": float(stats["step_time"]["max"]),
         },
+        "actor_step_seconds": [float(value) for value in df["actor_update_time"]],
         "peak_memory": {
             "gib": float(stats["peak_memory"]["mean"]),
             "pct": float(peak_memory_pct),

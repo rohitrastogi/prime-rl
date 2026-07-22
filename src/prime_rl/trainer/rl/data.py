@@ -1,18 +1,22 @@
+import gzip
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TypedDict
+from typing import IO, TypedDict
 
+import msgspec
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from prime_rl.configs.trainer import FakeDataLoaderConfig
+from prime_rl.trainer.batch import prepare_batch
 from prime_rl.trainer.rl.packer import BasePacker, setup_packer
 from prime_rl.trainer.runs import get_multi_run_manager
 from prime_rl.trainer.world import get_world
 from prime_rl.transport import (
     MicroBatch,
     MicroBatchReceiver,
+    TrainingSample,
     TransportConfig,
     setup_micro_batch_receiver,
 )
@@ -176,7 +180,7 @@ class FakeDataLoader:
 
 
 class DataLoader:
-    """Loads serialized data from a data path written by the orchestrator."""
+    """Loads and packs serialized training samples."""
 
     def __init__(
         self,
@@ -187,18 +191,30 @@ class DataLoader:
         pad_to_multiple_of: int,
         bin_cost: Callable[[Sequence[int]], int],
         config: TransportConfig,
+        trace_path: Path | None = None,
     ):
         self.world = get_world()
 
         if self.world.is_master:
-            self.packer: BasePacker = setup_packer(
-                dp_world_size=dp_world_size,
-                seq_len=seq_len,
-                transport_config=config,
-                pad_to_multiple_of=pad_to_multiple_of,
-                bin_cost=bin_cost,
-                start_step=start_step,
-            )
+            if trace_path is not None:
+                self.packer: BasePacker = _TracePacker(
+                    trace_path=trace_path,
+                    dp_world_size=dp_world_size,
+                    seq_len=seq_len,
+                    transport_config=config,
+                    pad_to_multiple_of=pad_to_multiple_of,
+                    bin_cost=bin_cost,
+                    start_step=start_step,
+                )
+            else:
+                self.packer = setup_packer(
+                    dp_world_size=dp_world_size,
+                    seq_len=seq_len,
+                    transport_config=config,
+                    pad_to_multiple_of=pad_to_multiple_of,
+                    bin_cost=bin_cost,
+                    start_step=start_step,
+                )
 
         non_dp_world_size = self.world.world_size // dp_world_size
         dp_rank = self.world.rank // non_dp_world_size
@@ -289,3 +305,212 @@ def _torch_dtype(name: str) -> torch.dtype:
     import numpy as np
 
     return torch.from_numpy(np.zeros(1, dtype=np.dtype(name))).dtype
+
+
+class _TraceStep(msgspec.Struct, forbid_unknown_fields=True):
+    step_index: int
+    batch_id: str
+    warmup: bool
+    logical_samples: int
+    prepared_samples: int
+    logical_tokens: int
+    prepared_tokens: int
+    loss_tokens: int
+
+
+class _TraceManifest(msgspec.Struct, forbid_unknown_fields=True):
+    version: int
+    artifact_id: str
+    candidate_id: str
+    runtime: str
+    tokenized_artifact_id: str
+    converter_revision: str
+    temperature: float
+    padding_multiple: int
+    steps: list[_TraceStep]
+    row_counts: dict[str, int]
+
+
+class _TraceRecord(msgspec.Struct, forbid_unknown_fields=True):
+    step_index: int
+    sample_id: str
+    input_ids: list[int]
+    loss_mask: list[bool]
+    advantage: float
+    rollout_logprobs: list[float]
+
+
+class _TraceStepReader:
+    def __init__(self, path: Path):
+        if not path.is_file():
+            raise FileNotFoundError(f"Prepared Prime steps not found: {path}")
+
+        self.manifest = _load_trace_manifest(path.parent / "manifest.json")
+        self._file: IO[str] = gzip.open(path, "rt", encoding="utf-8")
+        self._decoder = msgspec.json.Decoder(type=_TraceRecord)
+        self._line_number = 0
+        self._record_count = 0
+        self._next_step = 0
+        self._pending: _TraceRecord | None = None
+
+    def read_step(self) -> list[TrainingSample]:
+        if self._next_step >= 6:
+            raise ValueError("Prepared Prime artifact contains only six steps")
+
+        expected_step = self._next_step
+        record = self._pending or self._read_record()
+        self._pending = None
+        if record is None:
+            raise ValueError(f"Prepared Prime artifact is missing step {expected_step}")
+        if record.step_index != expected_step:
+            raise ValueError(
+                f"Prepared Prime step order is invalid: expected {expected_step}, found {record.step_index}"
+            )
+
+        samples: list[TrainingSample] = []
+        while record is not None and record.step_index == expected_step:
+            samples.append(_to_training_sample(record, self.manifest.temperature))
+            record = self._read_record()
+
+        summary = self.manifest.steps[expected_step]
+        actual = (
+            len(samples),
+            sum(len(sample.token_ids) for sample in samples),
+            sum(sum(sample.mask) for sample in samples),
+        )
+        expected = (summary.prepared_samples, summary.prepared_tokens, summary.loss_tokens)
+        if actual != expected:
+            raise ValueError(
+                f"Prepared Prime step {expected_step} does not match its manifest: "
+                f"expected samples/tokens/loss_tokens {expected}, found {actual}"
+            )
+
+        if record is not None:
+            if record.step_index != expected_step + 1:
+                raise ValueError(
+                    f"Prepared Prime step order is invalid: expected {expected_step + 1}, found {record.step_index}"
+                )
+            self._pending = record
+
+        self._next_step += 1
+        if expected_step == 5:
+            self.close()
+            expected_records = self.manifest.row_counts["records"]
+            if self._record_count != expected_records:
+                raise ValueError(
+                    f"Prepared Prime record count mismatch: expected {expected_records}, found {self._record_count}"
+                )
+        elif self._pending is None:
+            raise ValueError(f"Prepared Prime artifact ended after step {expected_step}")
+
+        return samples
+
+    def close(self) -> None:
+        self._file.close()
+
+    def _read_record(self) -> _TraceRecord | None:
+        line = self._file.readline()
+        if not line:
+            return None
+        self._line_number += 1
+        try:
+            record = self._decoder.decode(line)
+        except msgspec.DecodeError as error:
+            raise ValueError(f"Invalid prepared Prime record on line {self._line_number}: {error}") from error
+        _validate_trace_record(record, self._line_number)
+        self._record_count += 1
+        return record
+
+
+class _TracePacker(BasePacker):
+    def __init__(
+        self,
+        trace_path: Path,
+        dp_world_size: int,
+        seq_len: int,
+        pad_to_multiple_of: int,
+        transport_config: TransportConfig,
+        bin_cost: Callable[[Sequence[int]], int],
+        start_step: int,
+    ):
+        super().__init__(
+            dp_world_size,
+            seq_len,
+            pad_to_multiple_of,
+            transport_config,
+            bin_cost,
+            start_step,
+        )
+        self.reader = _TraceStepReader(trace_path)
+
+    def pack(self) -> None:
+        self._heartbeat()
+        samples = self.reader.read_step()
+        longest_sample = max(len(sample.token_ids) for sample in samples)
+        if longest_sample > self.seq_len:
+            raise ValueError(f"Prepared Prime sample length {longest_sample} exceeds model.seq_len {self.seq_len}")
+        micro_batch_grid = prepare_batch(
+            rollouts=samples,
+            seq_len=self.seq_len,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            num_train_workers=self.dp_world_size,
+            idxs=[0] * len(samples),
+            num_loras=self.multi_run_manager.max_runs,
+            bin_cost=self.bin_cost,
+        )
+        self.sender.send(micro_batch_grid)
+
+
+def _load_trace_manifest(path: Path) -> _TraceManifest:
+    if not path.is_file():
+        raise FileNotFoundError(f"Prepared Prime manifest not found: {path}")
+    try:
+        manifest = msgspec.json.decode(path.read_bytes(), type=_TraceManifest)
+    except msgspec.DecodeError as error:
+        raise ValueError(f"Invalid prepared Prime manifest: {error}") from error
+
+    if manifest.version != 2 or manifest.runtime != "prime":
+        raise ValueError("Prepared artifact must be a version 2 Prime artifact")
+    if manifest.temperature <= 0:
+        raise ValueError("Prepared Prime temperature must be positive")
+    if manifest.padding_multiple != 1:
+        raise ValueError("Prepared Prime artifact cannot contain adapter padding")
+    if manifest.row_counts.keys() != {"records"}:
+        raise ValueError("Prepared Prime row counts must contain records")
+    if [step.step_index for step in manifest.steps] != list(range(6)):
+        raise ValueError("Prepared Prime artifact must contain steps zero through five")
+    if [step.warmup for step in manifest.steps] != [True, False, False, False, False, False]:
+        raise ValueError("Prepared Prime artifact must contain one warmup followed by five measured steps")
+    if any(step.logical_samples != step.prepared_samples for step in manifest.steps):
+        raise ValueError("Prepared Prime steps cannot contain adapter padding")
+    if any(step.logical_tokens != step.prepared_tokens for step in manifest.steps):
+        raise ValueError("Prepared Prime steps cannot contain token padding")
+    if manifest.row_counts["records"] != sum(step.prepared_samples for step in manifest.steps):
+        raise ValueError("Prepared Prime record count must match step summaries")
+    return manifest
+
+
+def _validate_trace_record(record: _TraceRecord, line_number: int) -> None:
+    length = len(record.input_ids)
+    if not record.sample_id:
+        raise ValueError(f"Prepared Prime record on line {line_number} has no sample ID")
+    if not 0 <= record.step_index <= 5:
+        raise ValueError(f"Prepared Prime record on line {line_number} has invalid step {record.step_index}")
+    if length == 0:
+        raise ValueError(f"Prepared Prime record on line {line_number} has no tokens")
+    if any(token_id < 0 for token_id in record.input_ids):
+        raise ValueError(f"Prepared Prime record on line {line_number} has a negative token ID")
+    if len(record.loss_mask) != length or len(record.rollout_logprobs) != length:
+        raise ValueError(f"Prepared Prime token arrays are misaligned on line {line_number}")
+
+
+def _to_training_sample(record: _TraceRecord, temperature: float) -> TrainingSample:
+    length = len(record.input_ids)
+    return TrainingSample(
+        token_ids=record.input_ids,
+        mask=record.loss_mask,
+        logprobs=record.rollout_logprobs,
+        temperatures=[temperature] * length,
+        advantages=[record.advantage] * length,
+        env_name="benchmark",
+    )
