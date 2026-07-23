@@ -6,6 +6,7 @@ import torch
 from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM as HFQwen3_5ForCausalLM
 
+from prime_rl.trainer.model import _is_qwen3_5_config
 from prime_rl.trainer.models.layers.attn import FlashAttention, substitute_ring_attn
 from prime_rl.trainer.models.qwen3_5 import Qwen3_5ForCausalLM, Qwen3_5Model
 from prime_rl.trainer.models.qwen3_5.modeling_qwen3_5 import Qwen3_5GatedFlashAttention
@@ -56,6 +57,20 @@ def _tiny_moe_config(attn_impl: str = "sdpa") -> Qwen3_5MoeConfig:
     )
     config._attn_implementation = attn_impl
     return config
+
+
+def test_qwen3_5_patch_dispatch_uses_loaded_config():
+    text_config = _tiny_text_config()
+    composite_config = Qwen3_5TextConfig()
+    composite_config.model_type = "qwen3_6"
+    composite_config.sub_configs = {"text_config": Qwen3_5TextConfig}
+    composite_config.text_config = text_config
+
+    assert _is_qwen3_5_config(text_config)
+    assert _is_qwen3_5_config(composite_config)
+
+    composite_config.text_config = None
+    assert not _is_qwen3_5_config(composite_config)
 
 
 def test_qwen3_5_dense_matches_hf_state_keys_on_meta():

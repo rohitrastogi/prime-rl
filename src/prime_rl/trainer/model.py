@@ -293,6 +293,16 @@ def _patch_qwen3_5_linear_attn_varlen():
     Qwen3_5TextModel.forward = _text_forward
 
 
+def _is_qwen3_5_config(model_config: PretrainedConfig) -> bool:
+    configs = [model_config]
+    configs.extend(
+        getattr(model_config, key)
+        for key in getattr(model_config, "sub_configs", {})
+        if getattr(model_config, key, None) is not None
+    )
+    return any(getattr(config, "model_type", "").startswith("qwen3_5") for config in configs)
+
+
 # Add filter to the standard logging module for transformers.modeling_utils to supress the
 # flash attention dtype warnings since FSDP is used to handle mixed precision.
 transformers_modeling_utils_logger = logging.getLogger("transformers.modeling_utils")
@@ -479,11 +489,6 @@ def get_model(
 
     is_vlm_training = config.vlm is not None
 
-    if "Qwen3.5" in config.name or "qwen3_5" in config.name.lower():
-        _patch_qwen3_5_text_position_ids()
-        _patch_qwen3_5_moe_conversion_mapping()
-        _patch_qwen3_5_linear_attn_varlen()
-
     model_config = cast(
         PretrainedConfig,
         AutoConfig.from_pretrained(
@@ -517,13 +522,12 @@ def get_model(
 
         _hub_kernels._kernels_enabled = True
 
-    # Fallback Qwen3.5 patch detection from loaded config model_type
-    if getattr(model_config, "model_type", "").startswith("qwen3_5_moe"):
+    if _is_qwen3_5_config(model_config):
         _patch_qwen3_5_text_position_ids()
         _patch_qwen3_5_moe_conversion_mapping()
         _patch_qwen3_5_linear_attn_varlen()
-    for subconfig_key in getattr(model_config, "sub_configs", {}):
-        subconfig = getattr(model_config, subconfig_key, None)
+    subconfigs = [getattr(model_config, key, None) for key in getattr(model_config, "sub_configs", {})]
+    for subconfig in subconfigs:
         if subconfig is not None and hasattr(subconfig, "use_cache"):
             subconfig.use_cache = False
     model_config.use_grouped_mm = config.moe_use_grouped_mm
