@@ -89,6 +89,17 @@ def test_trace_manifest_requires_one_warmup_step(tmp_path: Path) -> None:
         _TraceStepReader(path)
 
 
+def test_trace_manifest_accepts_v3_provenance_fields(tmp_path: Path) -> None:
+    path = _write_trace_artifact(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["version"] = 3
+    manifest["batches"] = [{"id": "admission", "group_ids": ["group-0"]}]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert _TraceStepReader(path).read_step()[0].token_ids == [0, 1, 2]
+
+
 def test_trace_data_configures_six_benchmark_steps(tmp_path: Path) -> None:
     path = _write_trace_artifact(tmp_path)
     config = TrainerConfig.model_validate({"data": {"trace": {"path": path}}, "bench": {}})

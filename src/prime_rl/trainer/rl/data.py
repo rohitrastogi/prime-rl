@@ -318,7 +318,7 @@ class _TraceStep(msgspec.Struct, forbid_unknown_fields=True):
     loss_tokens: int
 
 
-class _TraceManifest(msgspec.Struct, forbid_unknown_fields=True):
+class _TraceManifest(msgspec.Struct):
     version: int
     artifact_id: str
     candidate_id: str
@@ -469,8 +469,8 @@ def _load_trace_manifest(path: Path) -> _TraceManifest:
     except msgspec.DecodeError as error:
         raise ValueError(f"Invalid prepared Prime manifest: {error}") from error
 
-    if manifest.version != 2 or manifest.runtime != "prime":
-        raise ValueError("Prepared artifact must be a version 2 Prime artifact")
+    if manifest.version not in {2, 3} or manifest.runtime != "prime":
+        raise ValueError("Prepared artifact must be a supported Prime artifact")
     if manifest.temperature <= 0:
         raise ValueError("Prepared Prime temperature must be positive")
     if manifest.padding_multiple != 1:
