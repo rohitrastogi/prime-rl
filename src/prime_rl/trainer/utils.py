@@ -454,11 +454,6 @@ def export_benchmark_json(history: dict[str, list[Any]], output_path: Path) -> N
 
     The JSON contains aggregated statistics and the warmup-excluded actor-update series.
     """
-    history = history.copy()
-    history.pop("step", None)
-
-    # Turn metric history into pd.DataFrame
-    df = pd.DataFrame(dict(history.items()))
     columns = {
         "perf/mfu": "mfu",
         "perf/throughput": "throughput",
@@ -466,7 +461,7 @@ def export_benchmark_json(history: dict[str, list[Any]], output_path: Path) -> N
         "time/forward_backward": "actor_update_time",
         "perf/peak_memory": "peak_memory",
     }
-    df = df[columns.keys()].rename(columns=columns)
+    df = pd.DataFrame({name: history[name] for name in columns}).rename(columns=columns)
     df = df.iloc[1:]  # Exclude first warmup row
 
     # Calculate statistics
@@ -490,6 +485,7 @@ def export_benchmark_json(history: dict[str, list[Any]], output_path: Path) -> N
             "min": float(stats["throughput"]["min"]),
             "max": float(stats["throughput"]["max"]),
         },
+        "step_seconds": [float(value) for value in df["step_time"]],
         "step_time": {
             "mean": float(stats["step_time"]["mean"]),
             "std": float(stats["step_time"]["std"]),

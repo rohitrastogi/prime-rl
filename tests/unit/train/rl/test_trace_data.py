@@ -133,7 +133,7 @@ def test_trace_data_preserves_explicit_benchmark_steps(tmp_path: Path) -> None:
     assert config.max_steps == 2
 
 
-def test_benchmark_json_contains_five_warmup_excluded_actor_step_times(
+def test_benchmark_json_contains_five_warmup_excluded_step_series(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     output_path = tmp_path / "benchmark.json"
@@ -144,6 +144,7 @@ def test_benchmark_json_contains_five_warmup_excluded_actor_step_times(
         "time/step": [90.0, 10.0, 20.0, 30.0, 40.0, 50.0],
         "time/forward_backward": [9.0, 1.0, 2.0, 3.0, 4.0, 5.0],
         "perf/peak_memory": [20.0] * 6,
+        "optim/lr": [1e-6],
     }
     monkeypatch.setattr("torch.cuda.mem_get_info", lambda: (0, 80 * 1024**3))
 
@@ -151,6 +152,7 @@ def test_benchmark_json_contains_five_warmup_excluded_actor_step_times(
 
     result = json.loads(output_path.read_text(encoding="utf-8"))
     assert result["warmup_steps"] == 1
+    assert result["step_seconds"] == [10.0, 20.0, 30.0, 40.0, 50.0]
     assert result["actor_step_seconds"] == [1.0, 2.0, 3.0, 4.0, 5.0]
 
 
