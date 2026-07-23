@@ -397,18 +397,13 @@ def print_benchmark(history: dict[str, list[Any]]) -> None:
     training throughput and overall step time. First first N rows show the
     per-step values, and the last row shows the mean, std, min, and max values.
     """
-    history.pop("step")
-    assert all(len(v) for v in history.values()), "All metrics must have logged the same number of steps"
-
-    # Turn metric history into pd.DataFrame
-    df = pd.DataFrame(dict(history.items()))
     columns = {
         "perf/mfu": "MFU",
         "perf/throughput": "Throughput",
         "time/step": "Step Time",
         "perf/peak_memory": "Peak Memory",
     }
-    df = df[columns.keys()].rename(columns=columns)
+    df = pd.DataFrame({key: history[key] for key in columns}).rename(columns=columns)
     df = df.iloc[1:]  # Exclude first row
 
     # Setup console

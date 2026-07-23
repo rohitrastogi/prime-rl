@@ -10,7 +10,7 @@ import prime_rl.trainer.runs as runs
 from prime_rl.configs.shared import FileSystemTransportConfig
 from prime_rl.configs.trainer import TrainerConfig
 from prime_rl.trainer.rl.data import DataLoader, _TraceStepReader
-from prime_rl.trainer.utils import build_bin_cost, export_benchmark_json
+from prime_rl.trainer.utils import build_bin_cost, export_benchmark_json, print_benchmark
 from prime_rl.trainer.world import reset_world
 
 
@@ -152,6 +152,20 @@ def test_benchmark_json_contains_five_warmup_excluded_actor_step_times(
     result = json.loads(output_path.read_text(encoding="utf-8"))
     assert result["warmup_steps"] == 1
     assert result["actor_step_seconds"] == [1.0, 2.0, 3.0, 4.0, 5.0]
+
+
+def test_benchmark_table_ignores_metrics_with_other_cadences(monkeypatch: pytest.MonkeyPatch) -> None:
+    history = {
+        "step": [1, 2],
+        "perf/mfu": [10.0, 20.0],
+        "perf/throughput": [100.0, 200.0],
+        "time/step": [90.0, 10.0],
+        "perf/peak_memory": [20.0, 30.0],
+        "optim/lr": [1e-6],
+    }
+    monkeypatch.setattr("torch.cuda.mem_get_info", lambda: (0, 80 * 1024**3))
+
+    print_benchmark(history)
 
 
 def _write_trace_artifact(root: Path, misalign_step: int | None = None) -> Path:
