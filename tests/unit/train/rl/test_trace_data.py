@@ -92,8 +92,10 @@ def test_trace_manifest_requires_one_warmup_step(tmp_path: Path) -> None:
 def test_trace_data_configures_six_benchmark_steps(tmp_path: Path) -> None:
     path = _write_trace_artifact(tmp_path)
     config = TrainerConfig.model_validate({"data": {"trace": {"path": path}}, "bench": {}})
+    shortened = TrainerConfig.model_validate({"data": {"trace": {"path": path}}, "bench": {}, "max_steps": 2})
 
     assert config.max_steps == 6
+    assert shortened.max_steps == 2
     assert config.data.trace is not None
     assert config.data.fake is None
 

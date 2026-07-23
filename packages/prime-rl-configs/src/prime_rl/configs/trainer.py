@@ -622,10 +622,11 @@ class TrainerConfig(BaseConfig):
     @model_validator(mode="after")
     def auto_setup_bench(self):
         if self.bench is not None:
-            if self.data.trace is not None:
-                self.max_steps = 6  # 1 warmup + 5 measured steps
-            else:
-                self.max_steps = 4  # 1 warmup + 3 measured steps
+            if self.max_steps is None:
+                if self.data.trace is not None:
+                    self.max_steps = 6  # 1 warmup + 5 measured steps
+                else:
+                    self.max_steps = 4  # 1 warmup + 3 measured steps
             if self.data.fake is None and self.data.trace is None:
                 self.data.fake = FakeDataLoaderConfig()
             if self.ckpt:  # Do not checkpoint
